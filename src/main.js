@@ -10,7 +10,7 @@ const { ensureExportDirectory, existingExportPath, createProjectFolder } = requi
 const { normalizeUrl, getBrowserStatus, openWebsitePreview, closeWebsitePreview, closeAllWebsitePreviews } = require('./services/browser');
 const { getFfmpegStatus } = require('./services/video');
 const { Studio } = require('./services/studio');
-const { record, number, integer, id, captureOptions, videoOptions, imageFormat, str } = require('./services/inputs');
+const { record, number, integer, id, captureOptions, siteOptions, videoOptions, imageFormat, str } = require('./services/inputs');
 
 const RENDERER = path.join(__dirname, 'renderer', 'index.html');
 const RENDERER_URL = pathToFileURL(RENDERER).href;
@@ -258,6 +258,12 @@ function registerHandlers() {
       const project = projectFor(input);
       const options = captureOptions(input, store.snapshot().settings, project.url);
       return runStudio('Capturing website', (task) => studio.capture(project, options, input.manualId, task));
+    },
+    captureSite(value) {
+      const input = record(value);
+      const project = projectFor(input);
+      const options = siteOptions(input, store.snapshot().settings, project.url);
+      return runStudio('Capturing site pages', (task) => studio.captureSite(project, options, task));
     },
     saveScreenshot: (value) => runStudio('Saving screenshot', () => studio.exportAsset(record(value), 'screenshot')),
     renderMockup(value) {

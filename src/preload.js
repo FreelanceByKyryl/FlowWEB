@@ -6,7 +6,7 @@ const methods = [
   'load', 'saveProject', 'duplicateProject', 'deleteProject', 'thumbnail', 'saveSettings',
   'pickDirectory', 'pickImage', 'clearTemporary', 'dependencies', 'openWebsite',
   'openProjectFolder', 'openExport', 'openExportFolder', 'enqueue', 'queueCancel',
-  'queueRetry', 'queueSkip', 'previewWebsite', 'closeWebsitePreview', 'captureScreenshot',
+  'queueRetry', 'queueSkip', 'previewWebsite', 'closeWebsitePreview', 'captureScreenshot', 'captureSite',
   'saveScreenshot', 'renderMockup', 'saveMockup', 'renderPortfolio', 'savePortfolio',
   'recordVideo', 'cancelStudio'
 ];

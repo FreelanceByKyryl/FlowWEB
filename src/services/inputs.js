@@ -31,6 +31,15 @@ function str(value, max = 1000) {
   return value;
 }
 
+function lines(value, label, limit, maxLength) {
+  const entries = Array.isArray(value) ? value : str(value, limit * (maxLength + 2)).split(/\r?\n/u);
+  const result = entries.map((entry) => str(entry, maxLength).trim()).filter(Boolean);
+  if (result.length > limit || result.some((entry) => /[\0\r\n]/u.test(entry))) {
+    throw new Error(`Enter at most ${limit} ${label}, one per line.`);
+  }
+  return result;
+}
+
 function id(value) {
   if (typeof value !== 'string' || !/^[0-9a-z-]{1,64}$/i.test(value)) {
     throw new Error('Select a valid saved item.');
@@ -64,15 +73,30 @@ function captureOptions(input, settings, url) {
   return options;
 }
 
+function siteOptions(input, settings, url) {
+  return {
+    ...captureOptions({
+      ...input,
+      fullPage: input.fullPage !== false,
+      lazy: input.lazy !== false
+    }, settings, url),
+    maxPages: integer(input.maxPages, 20, 1, 100),
+    maxDepth: integer(input.maxDepth, 3, 0, 10),
+    paths: lines(input.pageUrls, 'page URLs', 100, 4096)
+  };
+}
+
 function videoOptions(input, settings, url) {
   const viewport = captureOptions({ ...input, quality: undefined, dpr: 1 }, settings, url);
   return {
     ...viewport,
-    mode: choice(input.mode, 'smooth', ['static', 'smooth', 'top-to-bottom', 'down-up', 'manual']),
+    mode: choice(input.mode, 'smooth', ['static', 'smooth', 'top-to-bottom', 'down-up', 'manual', 'navigation']),
     duration: number(input.duration, 8, 1, 180),
     initialPause: number(input.initialPause, 1, 0, 30),
     finalPause: number(input.finalPause, 1, 0, 30),
     scrollSpeed: number(input.scrollSpeed, 350, 10, 10000),
+    navigationLabels: lines(input.navigationLabels, 'button or link labels', 12, 160),
+    navigationWait: number(input.navigationWait, 1.5, 0, 30),
     outputWidth: integer(input.outputWidth, settings.videoWidth, 160, 3840),
     outputHeight: integer(input.outputHeight, settings.videoHeight, 160, 3840),
     quality: integer(input.quality, settings.videoQuality, 0, 51),
@@ -117,5 +141,5 @@ function extension(format) {
   return format === 'jpeg' ? 'jpg' : 'png';
 }
 
-module.exports = { record, number, integer, choice, str, id, captureOptions, videoOptions, imageOptions,
+module.exports = { record, number, integer, choice, str, id, captureOptions, siteOptions, videoOptions, imageOptions,
   mockupOptions, extension, imageFormat };

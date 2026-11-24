@@ -5,6 +5,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const sharp = require('sharp');
 const { captureScreenshot, captureManualScreenshot } = require('./screenshot');
+const { captureSite: captureSitePages } = require('./site');
 const { recordVideo } = require('./video');
 const { renderMockup } = require('./mockup');
 const { renderPortfolio, portfolioDescription, portfolioInfo, PORTFOLIO_PRESETS } = require('./portfolio');
@@ -126,6 +127,37 @@ class Studio {
     }
   }
 
+  async captureSite(project, options, task) {
+    const dir = await this.createWorkDirectory();
+    const root = this.store.snapshot().settings.exportDirectory;
+    const device = options.fullPage ? 'fullpage' : options.device;
+    const exports = new Map();
+    try {
+      const report = await captureSitePages(options, dir, {
+        ...task,
+        onPage: async (page) => {
+          task.signal.throwIfAborted();
+          const entry = await this.exportFile(root, project, 'screenshot', page.filename, page.path, {
+            device, sitePage: true, sourceUrl: page.url, pageTitle: page.title
+          });
+          exports.set(page.url, entry);
+          await fs.rm(page.path, { force: true });
+        }
+      });
+      return {
+        exports: [...exports.values()],
+        pages: [
+          ...report.pages.map(({ url, title }) => ({ url, title, status: 'completed', exportId: exports.get(url).id })),
+          ...report.failed.map(({ url, error }) => ({ url, error, status: 'failed' })),
+          ...report.skipped.map(({ url, reason }) => ({ url, error: reason, status: 'skipped' }))
+        ],
+        limited: report.limited
+      };
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  }
+
   async renderMockup(project, input, task) {
     const settings = this.store.snapshot().settings;
     const options = mockupOptions(input, settings);
@@ -156,7 +188,8 @@ class Studio {
       for (const [device, min, max] of [['desktop', 0, 0.35], ['mobile', 0.35, 0.70]]) {
         task.signal.throwIfAborted();
         const existing = this.store.snapshot().exports
-          .find((entry) => entry.projectId === project.id && entry.kind === 'screenshot' && entry.device === device);
+          .find((entry) => entry.projectId === project.id && entry.kind === 'screenshot' && entry.device === device &&
+            (!entry.sitePage || entry.sourceUrl === project.url));
         if (existing) {
           try { assets[device] = await existingExportPath(existing.path); } catch { /* Recapture unavailable assets. */ }
         }

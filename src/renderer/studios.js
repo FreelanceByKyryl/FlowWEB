@@ -11,6 +11,7 @@
 
   const settingsByView = new Map();
   const screenshotDrafts = [];
+  const siteCaptureResults = new Map();
   const mockupAssets = new Map();
   const artworkDrafts = new Map();
   let activeJob;
@@ -22,6 +23,12 @@
   const selected = (value) => value ? " selected" : "";
   const query = (root, name) => root.querySelector(`[data-role="${name}"]`);
   const projectById = (ctx, id) => ctx.state.projects.find((project) => project.id === id);
+  const lines = (value = "") => value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const siteKey = (projectId, url) => JSON.stringify([projectId, url.trim()]);
+
+  function itemCount(count, singular, plural = `${singular}s`) {
+    return `${count} ${count === 1 ? singular : plural}`;
+  }
 
   function safeImage(source) {
     return typeof source === "string" && /^data:image\/(?:png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/.test(source) ? source : "";
@@ -191,6 +198,34 @@
     }
   }
 
+  function siteCapturePreview(ctx, result) {
+    if (!result) return previewPlaceholder(
+      "files", "Ready to capture the site", "Each captured page is saved as a separate image."
+    );
+
+    const saved = result.exports.length;
+    const failed = result.pages.filter((page) => page.status === "failed").length;
+    const skipped = result.pages.filter((page) => page.status === "skipped").length;
+    const summary = [`${itemCount(saved, "image")} saved`, failed && `${failed} failed`, skipped && `${skipped} skipped`]
+      .filter(Boolean).join(" · ");
+    return `<div class="site-results panel" role="region" aria-label="Individual page results" tabindex="0">
+      <div class="site-results-summary"><h3>${summary}</h3>
+        ${result.limited ? '<p class="muted">The page or link-depth limit was reached.</p>' : ""}</div>
+      <ul class="site-page-list">${result.pages.map((page) => {
+        const complete = page.status === "completed";
+        const failed = page.status === "failed";
+        const status = complete ? "Saved" : failed ? "Failed" : "Skipped";
+        return `<li class="site-page">
+          <div class="site-page-copy"><strong>${ctx.escape(page.title || page.url)}</strong>
+            ${page.title ? `<small>${ctx.escape(page.url)}</small>` : ""}
+            ${page.error ? `<small>${ctx.escape(page.error)}</small>` : ""}</div>
+          <span class="badge ${complete ? "status-completed" : failed ? "status-failed" : "status-skipped"}">${status}</span>
+          ${complete && page.exportId ? `<button class="button ghost icon-button" type="button" data-site-export="${ctx.escape(page.exportId)}"
+            aria-label="Open screenshot of ${ctx.escape(page.title || page.url)}" title="Open screenshot">${icon("external-link")}</button>` : ""}
+        </li>`;
+      }).join("")}</ul></div>`;
+  }
+
   function screenshots(ctx) {
     const saved = settingsByView.get("screenshots");
     const projectId = defaultProject(ctx, saved);
@@ -203,6 +238,10 @@
       quality: ctx.state.settings.imageQuality || 90,
       dpr: 1,
       delay: 0,
+      scope: "page",
+      maxPages: 20,
+      maxDepth: 3,
+      pageUrls: "",
       fullPage: false,
       waitForAssets: true,
       lazy: false,
@@ -211,33 +250,47 @@
       projectId,
       url: projectId === saved?.projectId ? saved.url : project?.url
     };
+    let currentScope = options.scope;
+    const scopePreferences = settingsByView.get("screenshot-scopes") || {};
+    const scopeChecks = ["fullPage", "waitForAssets", "lazy"];
     let currentDraft = screenshotDrafts.findLast((item) => item.projectId === options.projectId);
     ctx.view.innerHTML = `${ctx.heading("Screenshot Studio", "Capture websites at the sizes you want to present.")}
       <div class="studio-grid" data-role="studio">
         <form class="panel studio-controls" data-role="form">
           ${group("Website", websiteInput(ctx, options.projectId, options.url))}
+          ${group("Capture scope", `
+            ${field("Scope", select("scope", options.scope, [["page", "Single page"], ["site", "Whole site"]]))}
+            <div class="stack" data-role="site-options" hidden>
+              <div class="form-grid">
+                ${field("Maximum pages", number("maxPages", options.maxPages, 1, 100))}
+                ${field("Maximum link depth", number("maxDepth", options.maxDepth, 0, 10))}</div>
+              ${field("Additional page URLs", `<textarea name="pageUrls" rows="3" spellcheck="false"
+                placeholder="/about&#10;/contact" aria-describedby="site-url-help">${ctx.escape(options.pageUrls)}</textarea>`)}
+              <p id="site-url-help" class="muted">Enter one URL or path from this site per line. Depth 0 captures only the starting page and these entries.</p>
+            </div>`)}
           ${group("Device viewports", `<div class="segmented">${devices.map((device) => `
             <label${device.width ? ` title="${device.width} × ${device.height}"` : ""}><input type="checkbox" name="device" value="${device.id}"${checked(options.devices.includes(device.id))}>
               <span>${icon(device.icon)}${device.name}</span></label>`).join("")}</div>
             <div data-role="custom-dimensions"${options.devices.includes("custom") ? "" : " hidden"}>
-              ${dimensionFields(options.width, options.height)}</div>`)}
+              ${dimensionFields(options.width, options.height)}</div>
+            <p class="muted" data-role="site-device-help" hidden>Whole-site capture uses one viewport per run.</p>`)}
           ${group("Capture options", `
             <div class="form-grid">${field("File type", select("format", options.format, [["png", "PNG"], ["jpeg", "JPEG"]]))}
             ${field("JPEG quality", number("quality", options.quality, 1, 100))}
             ${field("Pixel ratio", number("dpr", options.dpr, 0.5, 3, 0.5))}
-            ${field("Load delay (ms)", number("delay", options.delay, 0, 30000))}</div>
+            ${field("Extra wait after page load (ms)", number("delay", options.delay, 0, 30000))}</div>
             ${checkbox("fullPage", "Capture full page", options.fullPage)}
             ${checkbox("waitForAssets", "Wait for fonts and images", options.waitForAssets)}
             ${checkbox("lazy", "Load lazy content before capture", options.lazy)}
             ${checkbox("dismissCookies", "Dismiss known cookie banners", options.dismissCookies)}`)}
           <div class="actions">
-            <button class="button primary" type="submit">${icon("camera")}<span>Capture</span></button>
+            <button class="button primary" type="submit">${icon("camera")}<span data-role="capture-label">Capture</span></button>
             ${createButton("Live preview", "live", "external-link")}
           </div>
           <div data-role="manual-notice"></div>
         </form>
-        <section class="panel studio-preview" aria-label="Screenshot preview">
-          <div class="panel-heading preview-toolbar"><h2>Capture preview</h2>
+        <section class="panel studio-preview" aria-labelledby="screenshot-output-heading">
+          <div class="panel-heading preview-toolbar"><h2 id="screenshot-output-heading">Capture preview</h2>
             <div class="actions" data-role="export-actions"></div>
           </div>
           <div class="preview-stage" data-role="canvas"></div>
@@ -278,6 +331,23 @@
     }
 
     function renderPreview() {
+      const wholeSite = form.elements.scope.value === "site";
+      root.querySelector("#screenshot-output-heading").textContent = wholeSite ? "Site captures" : "Capture preview";
+      if (wholeSite) {
+        const result = siteCaptureResults.get(siteKey(form.elements.projectId.value, form.elements.url.value));
+        const latestExport = result?.exports.at(-1);
+        canvas.innerHTML = siteCapturePreview(ctx, result);
+        choices.innerHTML = "";
+        choices.hidden = true;
+        exportActions.innerHTML = latestExport ? createButton("Open folder", "open-site-folder", "folder-open") : "";
+        const folder = query(root, "open-site-folder");
+        if (folder) folder.onclick = () => ctx.api.openExportFolder(latestExport.id).catch(ctx.failure);
+        canvas.querySelectorAll("[data-site-export]").forEach((button) => {
+          button.onclick = () => ctx.api.openExport(button.dataset.siteExport).catch(ctx.failure);
+        });
+        ctx.icons();
+        return;
+      }
       const related = relatedDrafts();
       if (!related.includes(currentDraft)) currentDraft = related.at(-1);
       canvas.innerHTML = imagePreview(ctx, currentDraft, "Captured website", previewPlaceholder(
@@ -321,12 +391,20 @@
 
     function updateControls() {
       const values = read();
+      const wholeSite = values.scope === "site";
+      query(root, "site-options").hidden = !wholeSite;
+      query(root, "site-device-help").hidden = !wholeSite;
+      for (const name of ["maxPages", "maxDepth", "pageUrls"]) form.elements[name].disabled = !wholeSite;
+      query(root, "capture-label").textContent = wholeSite ? "Capture site" : "Capture";
+      query(root, "live").hidden = wholeSite;
       query(root, "custom-dimensions").hidden = !values.devices.includes("custom");
       form.elements.width.disabled = !values.devices.includes("custom");
       form.elements.height.disabled = !values.devices.includes("custom");
       form.elements.quality.disabled = values.format !== "jpeg";
-      const isLive = liveSession?.url === values.url && values.devices.includes(liveSession.device);
-      manualNotice.innerHTML = liveSession ? `${isLive ? openedManualSession() : '<p class="muted">An interactive preview is open for a different viewport or URL.</p>'}${createButton("Close preview", "close-live", "x", "ghost")}` : "";
+      const isLive = !wholeSite && liveSession?.url === values.url && values.devices.includes(liveSession.device);
+      const liveHint = wholeSite ? "An interactive preview from single-page capture is open." :
+        "An interactive preview is open for a different viewport or URL.";
+      manualNotice.innerHTML = liveSession ? `${isLive ? openedManualSession() : `<p class="muted">${liveHint}</p>`}${createButton("Close preview", "close-live", "x", "ghost")}` : "";
       const close = query(root, "close-live");
       if (close) close.onclick = async () => {
         try {
@@ -353,16 +431,59 @@
     }
 
     watchProjectUrl(ctx, form);
-    form.addEventListener("change", () => {
-      remember();
+    form.addEventListener("change", (event) => {
+      if (event.target === form.elements.scope) {
+        const current = read();
+        scopePreferences[currentScope] = {
+          devices: current.devices,
+          ...Object.fromEntries(scopeChecks.map((name) => [name, current[name]]))
+        };
+        currentScope = current.scope;
+        const next = scopePreferences[currentScope] || {
+          devices: currentScope === "site" ? current.devices.slice(0, 1) : current.devices,
+          fullPage: currentScope === "site",
+          waitForAssets: true,
+          lazy: currentScope === "site"
+        };
+        for (const name of scopeChecks) form.elements[name].checked = next[name];
+        form.querySelectorAll('input[name="device"]').forEach((input) => {
+          input.checked = next.devices.includes(input.value);
+        });
+        settingsByView.set("screenshot-scopes", scopePreferences);
+      }
+      if (form.elements.scope.value === "site") {
+        const selectedDevices = [...form.querySelectorAll('input[name="device"]:checked')];
+        if (selectedDevices.length > 1) {
+          const chosen = selectedDevices.includes(event.target) ? event.target : selectedDevices[0];
+          selectedDevices.forEach((input) => { input.checked = input === chosen; });
+        }
+      }
       updateControls();
+      remember();
       renderPreview();
     });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const data = read();
+      const { scope, maxPages, maxDepth, pageUrls, ...data } = read();
       if (data.devices.length === 0) {
         ctx.notify("Choose at least one device viewport.", "error");
+        return;
+      }
+      if (scope === "site") {
+        const { manualId: _manualId, ...input } = screenOptions(data, data.devices[0]);
+        const result = await execute(ctx, root, "Discovering site pages…", () => {
+          assertValid(form);
+          return ctx.api.captureSite({ ...input, maxPages, maxDepth, pageUrls: lines(pageUrls) });
+        });
+        if (result) {
+          siteCaptureResults.set(siteKey(data.projectId, data.url), result);
+          const savedCount = result.exports.length;
+          const failureCount = result.pages.filter((page) => page.status === "failed").length;
+          if (savedCount) ctx.notify(`${itemCount(savedCount, "page")} saved.`, "success");
+          if (failureCount) ctx.notify(`${itemCount(failureCount, "page")} could not be captured.`, "error");
+          if (root.isConnected) renderPreview();
+        }
+        await refreshData(ctx);
         return;
       }
 
@@ -394,7 +515,7 @@
     });
 
     query(root, "live").onclick = async () => {
-      const data = read();
+      const { scope, maxPages, maxDepth, pageUrls, ...data } = read();
       if (data.devices.length !== 1) {
         ctx.notify("Select one device to open an interactive preview.", "info");
         return;
@@ -903,6 +1024,10 @@
       duration: 12,
       initialPause: 1,
       finalPause: 1,
+      navigationLabels: "",
+      navigationWait: 1.5,
+      delay: 0,
+      waitForAssets: true,
       scrollSpeed: 250,
       title: "",
       titleScreen: false,
@@ -922,9 +1047,16 @@
           ${group("Recording", `
             ${field("Mode", select("mode", options.mode, [
               ["static", "Static recording"], ["smooth", "Smooth scrolling"], ["top-to-bottom", "Scroll to bottom"],
-              ["down-up", "Scroll down and back up"], ["manual", "Manual interaction"]
+              ["down-up", "Scroll down and back up"], ["navigation", "Navigate links and buttons"], ["manual", "Manual interaction"]
             ]))}
             <p class="muted" data-role="manual-video" hidden>Chromium opens during recording so you can interact with the page.</p>
+            <div class="stack" data-role="navigation-video" hidden>
+              ${field("Link or button labels", `<textarea name="navigationLabels" rows="4" spellcheck="false"
+                placeholder="Work&#10;Contact" aria-describedby="video-navigation-help">${ctx.escape(options.navigationLabels)}</textarea>`)}
+              <p id="video-navigation-help" class="muted">Enter up to 12 exact visible labels, one per line, in the order to click them. Leave blank to follow up to 6 suggested links within the site.</p>
+              ${field("Pause after each action (sec)", number("navigationWait", options.navigationWait, 0, 30, 0.5))}
+              <p class="muted">The recording can run longer than the minimum duration to finish the sequence.</p>
+            </div>
             ${field("Capture viewport", select("device", options.device, devices.map((item) => [item.id, item.name])))}
             <div data-role="custom-viewport">${dimensionFields(options.width, options.height, 160, 4096)}</div>
             <div class="form-grid">
@@ -933,6 +1065,9 @@
               ${field("Initial pause (sec)", number("initialPause", options.initialPause, 0, 30, 0.5))}
               ${field("Final pause (sec)", number("finalPause", options.finalPause, 0, 30, 0.5))}
             </div>`)}
+          ${group("Page readiness", `
+            ${field("Extra wait before recording (ms)", number("delay", options.delay, 0, 30000))}
+            ${checkbox("waitForAssets", "Wait for fonts and images", options.waitForAssets)}`)}
           ${group("Presentation", `
             ${checkbox("titleScreen", "Add a title screen", options.titleScreen)}
             <div data-role="title-input">${field("Title", `<input name="title" maxlength="120" value="${ctx.escape(options.title)}" placeholder="Use project name">`)}</div>
@@ -991,8 +1126,14 @@
       query(root, "custom-viewport").hidden = !isCustom;
       form.elements.width.disabled = !isCustom;
       form.elements.height.disabled = !isCustom;
-      query(root, "manual-video").hidden = form.elements.mode.value !== "manual";
-      form.elements.scrollSpeed.disabled = form.elements.mode.value !== "smooth";
+      const mode = form.elements.mode.value;
+      const navigationMode = mode === "navigation";
+      query(root, "manual-video").hidden = mode !== "manual";
+      query(root, "navigation-video").hidden = !navigationMode;
+      form.elements.navigationLabels.disabled = !navigationMode;
+      form.elements.navigationWait.disabled = !navigationMode;
+      form.elements.duration.labels[0].firstElementChild.textContent = navigationMode ? "Minimum duration (sec)" : "Duration (sec)";
+      form.elements.scrollSpeed.disabled = mode !== "smooth";
       query(root, "title-input").hidden = !form.elements.titleScreen.checked;
       form.elements.title.disabled = !form.elements.titleScreen.checked;
     }
@@ -1020,17 +1161,19 @@
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const input = getFormValues(form);
+      const { navigationLabels, ...input } = getFormValues(form);
       const selectedProject = projectById(ctx, input.projectId);
       const preset = devices.find((item) => item.id === input.device);
       const data = {
         ...input,
+        ...(input.mode === "navigation" ? { navigationLabels: lines(navigationLabels) } : {}),
         width: preset?.width || input.width,
         height: preset?.height || input.height,
         title: input.titleScreen ? input.title?.trim() || selectedProject?.name || defaultVideoTitle(input.url) : ""
       };
       remember();
-      const result = await execute(ctx, root, data.mode === "manual" ? "Opening interactive Chromium…" : "Preparing recording…",
+      const label = data.mode === "manual" ? "Opening interactive Chromium…" : "Loading website for recording…";
+      const result = await execute(ctx, root, label,
         () => ctx.api.recordVideo(data));
       if (!result?.id) return;
       completed = result;

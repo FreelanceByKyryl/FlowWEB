@@ -34,9 +34,10 @@ npm.cmd run dev
 
 - Create a project with a website URL and optional category, description, technologies, and features. Thumbnail capture runs in the background.
 - **Screenshot Studio** captures any combination of desktop, laptop, tablet, mobile, and custom sizes. Preview the result before saving as PNG or JPEG. For interaction, open the live Chromium window, interact with the page there, then capture from Screenshot Studio.
+- Choose **Whole site** in Screenshot Studio to save a separate image for each reachable internal page. Choose a viewport and set the page and link-depth limits. Add routes such as `/projects` or `/contact` on separate lines to include pages that the site does not link to directly. Full-page capture, fonts and image waits, and lazy content loading are enabled by default in this mode. Increase the load delay if a page has a longer intro.
 - **Mockup Studio** previews seven device layouts and eight original templates. Start from a saved screenshot, capture the project website, or import your own assets. Customize the background, frame geometry, text, and export size up to 4K.
 - The **Portfolio** tab in Mockup Studio builds a composition with desktop, mobile, and a device mockup. It exports the image, editable description text, and project JSON. Presets set the canvas dimensions for each use and can be adjusted.
-- **Video Studio** records live pages in static, smooth, top-to-bottom, return-scroll, and manual modes. Export H.264 MP4 as landscape, portrait, square, or a custom size. Manual recordings run for the selected duration in a separate Chromium window.
+- **Video Studio** records live pages in static, smooth, top-to-bottom, return-scroll, navigation, and manual modes. Export H.264 MP4 as landscape, portrait, square, or a custom size. In **Navigate links and buttons**, enter the text of each internal link or navigation button in the order it appears in the tour, one per line. An empty list picks a short route through visible internal links. The recording waits for each destination and can extend past the minimum duration to finish the tour. Manual recordings run for the selected duration in a separate Chromium window.
 - **Batch Export** queues selected projects and reports progress per project. Select device screenshots, a full-page screenshot, a mockup, a scrolling video, and portfolio text. You can cancel the batch, skip a project, or retry failed work.
 - **Export History** opens exported files and their folders. **Settings** updates output defaults, theme, browser timeout, and batch concurrency. Automatic project saving preserves the in-progress form as a local draft.
 
@@ -49,7 +50,7 @@ npm.cmd run setup
 npm.cmd run test
 ```
 
-The tests serve local pages to verify responsive screenshots and real scroll footage, exercise persistent storage and the queue, inspect PNG/JPEG mockup and portfolio output, and run a multi-project batch. The asset integration tests require Chromium and FFmpeg.
+The tests serve local pages to verify responsive screenshots, multiple-page capture, and live scroll and navigation footage. They also exercise persistent storage, the queue, and mockup, portfolio, and batch exports. The asset integration tests require Chromium and FFmpeg.
 
 ## Build the Windows installer
 
@@ -75,7 +76,7 @@ That browser-install command requires Node.js and npm. If you already have a com
 | --- | --- |
 | `src/main.js`, `src/preload.js` | Electron window, validated IPC, native file dialogs, and startup/shutdown |
 | `src/renderer/` | Desktop interface, editors, local theme and UI state |
-| `src/services/browser.js`, `screenshot.js`, `video.js` | Isolated Chromium capture, scrolling, frame recording, and FFmpeg export |
+| `src/services/browser.js`, `screenshot.js`, `site.js`, `video.js` | Isolated Chromium capture, page discovery, scrolling, frame recording, and FFmpeg export |
 | `src/services/mockup.js`, `graphics.js`, `portfolio.js` | Original device frames, image compositing, and portfolio output |
 | `src/services/storage.js`, `exports.js`, `queue.js` | Atomic JSON state, organized outputs, and cancellable batch execution |
 | `src/services/studio.js`, `inputs.js` | Validated options, preview assets, job orchestration, and export history |

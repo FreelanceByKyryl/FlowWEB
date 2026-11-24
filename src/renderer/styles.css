@@ -812,6 +812,22 @@ progress::-webkit-progress-bar { background: var(--raised); border-radius: 99px;
   box-shadow: var(--shadow);
 }
 
+.site-results { width: 100%; min-width: 0; max-height: 55vh; overflow: auto; }
+.site-results-summary { padding: 12px; border-bottom: 1px solid var(--border); }
+.site-results-summary p { margin-top: 3px; }
+.site-page-list { margin: 0; padding: 0; list-style: none; }
+.site-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+.site-page + .site-page { border-top: 1px solid var(--border); }
+.site-page-copy { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.site-page-copy strong { font-size: 12px; }
+.site-page-copy small { font-size: 11px; }
+
 .studio-status { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
 .studio-preview > .studio-status { padding: 10px 13px; }
 .studio-status .preview-toolbar { min-height: 0; padding: 0; }

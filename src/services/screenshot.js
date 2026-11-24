@@ -5,6 +5,7 @@ const {
   progress,
   evaluateWithDeadline,
   numberOption,
+  preparePage,
   openWebsitePreview,
   closeWebsitePreview,
   getWebsitePreview,
@@ -63,6 +64,7 @@ async function captureManualScreenshot(id, options, outputPath, task = {}) {
   task.signal?.addEventListener('abort', abort, { once: true });
   try {
     task.signal?.throwIfAborted();
+    await preparePage(session.page, options, task, session.timeout);
     return await capturePage(session, options, outputPath, task);
   } catch (error) {
     task.signal?.throwIfAborted();
@@ -75,6 +77,8 @@ async function captureManualScreenshot(id, options, outputPath, task = {}) {
 
 module.exports = {
   captureScreenshot,
+  capturePage,
+  screenshotFormat,
   openManualCapture: openWebsitePreview,
   captureManualScreenshot,
   closeManualCapture: closeWebsitePreview,

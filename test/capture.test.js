@@ -23,10 +23,10 @@ const fixture = `<!doctype html>
 </style>
 </head><body><section class="top"></section><section class="bottom"></section></body></html>`;
 
-async function localFixture(context) {
+async function localFixture(context, handle = () => fixture) {
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
-    response.end(fixture);
+    response.end(handle(request, response));
   });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -119,5 +119,101 @@ test('cancels live recording before publishing an export', { timeout: 30000 }, a
       if (stage === 'Recording website') controller.abort(reason);
     },
   }), reason);
+  assert.deepEqual(await readdir(folder), []);
+});
+
+function routeFixture(color, action = '') {
+  return `<!doctype html><meta charset="utf-8"><title>Navigation fixture</title>
+  <style>body { background: ${color}; }</style><main>${action}</main>`;
+}
+
+async function videoRouteColors(ffmpeg, output) {
+  const { stdout } = await promisify(execFile)(ffmpeg, [
+    '-v', 'error', '-i', output, '-vf', 'scale=1:1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1',
+  ], { encoding: 'buffer', windowsHide: true });
+  const changes = [];
+  for (let offset = 0; offset < stdout.length; offset += 3) {
+    const pixel = [...stdout.subarray(offset, offset + 3)];
+    const highest = Math.max(...pixel);
+    if (highest < 145 || highest - Math.min(...pixel) < 65) continue;
+    const color = ['red', 'green', 'blue'][pixel.indexOf(highest)];
+    if (changes.at(-1) !== color) changes.push(color);
+  }
+  return changes;
+}
+
+test('records real clicks and waits for a delayed button redirect and linked destination', { timeout: 30000 }, async (context) => {
+  const visited = [];
+  const { url, folder } = await localFixture(context, (request) => {
+    if (request.url === '/') {
+      visited.push('/');
+      return routeFixture('#e03040', `
+        <button type="button" onclick="setTimeout(() => location.assign('/features'), 1200)">Explore Features</button>
+      `);
+    }
+    if (request.url === '/features') {
+      visited.push('/features');
+      return routeFixture('#20b060', '<a href="/case-study">Read the Case Study</a>');
+    }
+    if (request.url === '/case-study') {
+      visited.push('/case-study');
+      return routeFixture('#2040e0');
+    }
+    return '';
+  });
+  const ffmpeg = await getFfmpegStatus();
+  assert.equal(ffmpeg.available, true, ffmpeg.error);
+  const output = join(folder, 'tour.mp4');
+  const info = await recordVideo({
+    url, width: 640, height: 360, outputWidth: 640, outputHeight: 360,
+    mode: 'navigation', duration: 1, initialPause: 0.25, finalPause: 0.15, timeout: 5000,
+    navigationLabels: 'Explore Features\nRead the Case Study', navigationWait: 0.35,
+  }, output);
+  assert.deepEqual(visited, ['/', '/features', '/case-study']);
+  assert.ok(info.duration > 2, `The video must extend to finish navigation, got ${info.duration} seconds`);
+  assert.deepEqual(await videoRouteColors(ffmpeg.path, output), ['red', 'green', 'blue']);
+});
+
+test('suggests same-site links while skipping destructive routes and form submissions', { timeout: 30000 }, async (context) => {
+  const requests = [];
+  const { url, folder } = await localFixture(context, (request) => {
+    requests.push(`${request.method} ${request.url}`);
+    return request.url === '/' ? routeFixture('#e03040', `
+      <a class="cta" href="/delete">Delete</a>
+      <a href="/features">Explore Features</a>
+      <form method="post" action="/confirm"><button>Continue</button></form>
+    `) : routeFixture('#20b060');
+  });
+  const options = {
+    url, width: 480, height: 300, outputWidth: 480, outputHeight: 300,
+    mode: 'navigation', duration: 1, navigationWait: 0.25, timeout: 4000,
+  };
+  await recordVideo(options, join(folder, 'suggested.mp4'));
+  await assert.rejects(recordVideo({ ...options, navigationLabels: ['Continue'] }, join(folder, 'blocked.mp4')),
+    /same-site link or a non-form button/);
+  assert.ok(requests.includes('GET /features'));
+  assert.ok(!requests.includes('GET /delete'));
+  assert.ok(!requests.includes('POST /confirm'));
+  assert.deepEqual(await readdir(folder), ['suggested.mp4']);
+});
+
+test('blocks an off-site redirect during automatic navigation', { timeout: 30000 }, async (context) => {
+  let externalRequests = 0;
+  const external = await localFixture(context, () => {
+    externalRequests++;
+    return routeFixture('#2040e0');
+  });
+  const { url, folder } = await localFixture(context, (request, response) => {
+    if (request.url === '/continue') {
+      response.writeHead(302, { Location: external.url });
+      return '';
+    }
+    return routeFixture('#e03040', '<a href="/continue">Continue Reading</a>');
+  });
+  await assert.rejects(recordVideo({
+    url, width: 480, height: 300, outputWidth: 480, outputHeight: 300,
+    mode: 'navigation', duration: 1, navigationLabels: 'Continue Reading', timeout: 3000,
+  }, join(folder, 'blocked.mp4')), /blocked|outside|new route/i);
+  assert.equal(externalRequests, 0);
   assert.deepEqual(await readdir(folder), []);
 });

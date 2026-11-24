@@ -11,6 +11,7 @@ const devicePresets = Object.freeze({
 });
 
 const previews = new Map();
+const pageRequests = new WeakMap();
 
 function normalizeUrl(value) {
   if (typeof value !== 'string' || !value.trim() || value.length > 4096) {
@@ -94,7 +95,22 @@ async function evaluateWithDeadline(page, evaluator, argument, timeout, message)
   }
 }
 
-async function openBrowser(options, task = {}, headed = false) {
+function observePageRequests(page) {
+  const requests = { pending: new Set(), changedAt: performance.now() };
+  pageRequests.set(page, requests);
+  page.on('request', (request) => {
+    if (['eventsource', 'websocket'].includes(request.resourceType())) return;
+    requests.pending.add(request);
+    requests.changedAt = performance.now();
+  });
+  const settle = (request) => {
+    if (requests.pending.delete(request)) requests.changedAt = performance.now();
+  };
+  page.on('requestfinished', settle);
+  page.on('requestfailed', settle);
+}
+
+async function openBrowser(options, task = {}, headed = false, controls = {}) {
   const url = normalizeUrl(options.url);
   const viewport = resolveViewport(options);
   const dpr = numberOption(options.dpr, 1, 'Device pixel ratio', 0.5, 3);
@@ -131,6 +147,7 @@ async function openBrowser(options, task = {}, headed = false) {
 
     const context = await browser.newContext({
       acceptDownloads: false,
+      serviceWorkers: controls.serviceWorkers,
       viewport,
       screen: viewport,
       deviceScaleFactor: dpr,
@@ -141,16 +158,18 @@ async function openBrowser(options, task = {}, headed = false) {
     });
     context.setDefaultTimeout(timeout);
     const page = await context.newPage();
-    progress(task, 0.09, 'Loading website');
-
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
-    if (!/^https?:/.test(page.url())) {
-      throw new Error('The page redirected outside HTTP or HTTPS.');
+    observePageRequests(page);
+    if (!controls.deferNavigation) {
+      progress(task, 0.09, 'Loading website');
+      const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+      if (!/^https?:/.test(page.url())) {
+        throw new Error('The page redirected outside HTTP or HTTPS.');
+      }
+      if (response?.status() >= 400) {
+        throw new Error(`The website returned HTTP ${response.status()}. Confirm the URL and website availability.`);
+      }
+      await preparePage(page, options, task, timeout);
     }
-    if (response?.status() >= 400) {
-      throw new Error(`The website returned HTTP ${response.status()}. Confirm the URL and website availability.`);
-    }
-    await preparePage(page, options, task, timeout);
     return { browser, context, page, viewport, timeout, removeAbort };
   } catch (error) {
     removeAbort();
@@ -170,11 +189,29 @@ async function openBrowser(options, task = {}, headed = false) {
   }
 }
 
-async function waitForAssets(page, timeout) {
-  const assetTimeout = Math.min(timeout, 8000);
+async function waitForAssets(page, timeout, signal) {
+  const assetTimeout = Math.min(timeout, 15000);
+  const deadline = performance.now() + assetTimeout;
+  const requests = pageRequests.get(page);
+  let quietSince = performance.now();
+  while (performance.now() < deadline) {
+    signal?.throwIfAborted();
+    const remaining = deadline - performance.now();
+    const ready = await evaluateWithDeadline(page, () => {
+      const candidates = Array.from(document.images).filter((image) => image.loading !== 'lazy' || image.complete);
+      return document.readyState === 'complete' && document.fonts?.status !== 'loading'
+        && candidates.every((image) => image.complete);
+    }, undefined, remaining + 500, 'The webpage stopped responding while loading fonts and images.');
+    const now = performance.now();
+    if (!ready || requests?.pending.size) quietSince = now;
+    if (ready && now - Math.max(quietSince, requests?.changedAt || 0) >= 650) break;
+    await sleep(Math.max(0, Math.min(100, deadline - now)), undefined, { signal });
+  }
+
+  const remaining = Math.max(100, deadline - performance.now());
   await evaluateWithDeadline(page, (limit) => {
     const waitForImages = () => {
-      const images = Array.from(document.images).filter((image) => image.loading !== 'lazy' || image.complete);
+      const images = Array.from(document.images).filter((image) => image.complete);
       return Promise.allSettled(images.map((image) => image.decode()));
     };
     return new Promise((resolve) => {
@@ -184,27 +221,34 @@ async function waitForAssets(page, timeout) {
         resolve();
       });
     });
-  }, assetTimeout, assetTimeout + 1500, 'The webpage stopped responding while loading fonts and images.');
+  }, remaining, remaining + 500, 'The webpage stopped responding while decoding fonts and images.');
 }
 
 async function activateLazyContent(page, timeout) {
-  const scrollTimeout = Math.min(timeout, 8000);
+  const scrollTimeout = Math.min(timeout, 25000);
   await evaluateWithDeadline(page, async (limit) => {
     const start = performance.now();
     const originalX = window.scrollX;
     const originalY = window.scrollY;
-    const settle = () => new Promise((resolve) => setTimeout(resolve, 90));
+    const settle = (duration) => new Promise((resolve) => setTimeout(resolve, duration));
+    const pageHeight = () => document.scrollingElement.scrollHeight;
+    const loadImages = () => {
+      for (const image of document.querySelectorAll('img[loading="lazy"]')) image.loading = 'eager';
+    };
     try {
+      loadImages();
       window.scrollTo({ top: 0, behavior: 'instant' });
       while (performance.now() - start < limit) {
         const current = window.scrollY;
+        const height = pageHeight();
         window.scrollBy({ top: Math.max(100, innerHeight * 0.85), behavior: 'instant' });
-        await settle();
-        if (window.scrollY === current) break;
+        await settle(window.scrollY === current ? 750 : 220);
+        loadImages();
+        if (window.scrollY === current && pageHeight() === height) break;
       }
     } finally {
       window.scrollTo({ top: originalY, left: originalX, behavior: 'instant' });
-      await settle();
+      await settle(100);
     }
   }, scrollTimeout, scrollTimeout + 1500, 'The webpage stopped responding while loading off-screen content.');
 }
@@ -235,15 +279,18 @@ async function preparePage(page, options, task, timeout) {
     await sleep(delay, undefined, { signal: task.signal });
   }
   if (options.dismissCookies) await dismissKnownConsent(page);
-  if (options.lazy || options.waitForAssets !== false) {
-    progress(task, 0.17, 'Loading fonts and images');
-    if (options.lazy) await activateLazyContent(page, timeout);
-    if (options.waitForAssets !== false) await waitForAssets(page, timeout);
+  if (options.lazy) {
+    progress(task, 0.16, 'Loading off-screen content');
+    await activateLazyContent(page, timeout);
+  }
+  if (options.waitForAssets !== false) {
+    progress(task, 0.17, 'Waiting for page assets');
+    await waitForAssets(page, timeout, task.signal);
   }
 }
 
-async function withWebsite(options, task, handler, headed = false) {
-  const session = await openBrowser(options, task, headed);
+async function withWebsite(options, task, handler, headed = false, controls) {
+  const session = await openBrowser(options, task, headed, controls);
   try {
     return await handler(session);
   } catch (error) {
@@ -291,6 +338,8 @@ module.exports = {
   getBrowserStatus,
   numberOption,
   withWebsite,
+  preparePage,
+  waitForAssets,
   progress,
   evaluateWithDeadline,
   openWebsitePreview,

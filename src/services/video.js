@@ -7,11 +7,13 @@ const { setTimeout: sleep } = require('node:timers/promises');
 const { promisify } = require('node:util');
 const sharp = require('sharp');
 const { withWebsite, numberOption, progress, evaluateWithDeadline } = require('./browser');
+const { navigationLabels, runNavigationTour } = require('./navigation');
 
 const runFile = promisify(execFile);
 const framesPerSecond = 30;
 const introSeconds = 2;
-const modes = ['static', 'smooth', 'top-to-bottom', 'down-up', 'manual'];
+const modes = ['static', 'smooth', 'top-to-bottom', 'down-up', 'navigation', 'manual'];
+const maxTourSeconds = 240;
 
 function getFfmpegPath() {
   return process.env.SHOWCASE_FFMPEG_PATH || 'ffmpeg';
@@ -57,13 +59,17 @@ function videoSettings(options) {
     totalDuration: Math.ceil((duration + initialPause + finalPause) * framesPerSecond) / framesPerSecond,
     scrollSpeed: numberOption(options.scrollSpeed, 240, 'Scroll speed (pixels per second)', 10, 10000),
     quality: numberOption(options.quality, 23, 'Video quality (CRF)', 0, 51, true),
+    ...(mode === 'navigation' && {
+      navigationLabels: navigationLabels(options.navigationLabels),
+      navigationWait: numberOption(options.navigationWait, 1, 'Wait after navigation (seconds)', 0, 30),
+    }),
     fadeIn: Boolean(options.fadeIn),
     fadeOut: Boolean(options.fadeOut),
   };
 }
 
 async function schedulePageScroll(page, { mode, duration, initialPause, scrollSpeed }, timeout) {
-  if (mode === 'static' || mode === 'manual') return;
+  if (mode === 'static' || mode === 'manual' || mode === 'navigation') return;
   await evaluateWithDeadline(page, ({ mode, duration, initialPause, scrollSpeed }) => {
     const scroll = (top) => window.scrollTo({ top, behavior: 'instant' });
     scroll(0);
@@ -82,10 +88,11 @@ async function schedulePageScroll(page, { mode, duration, initialPause, scrollSp
   }, { mode, duration, initialPause, scrollSpeed }, timeout, 'The webpage stopped responding before scrolling could start.');
 }
 
-async function recordFrames(session, settings, rawFile, task) {
+async function recordFrames(session, settings, options, rawFile, task) {
   const { page, context, viewport, timeout } = session;
   const cdp = await context.newCDPSession(page);
   const capture = await open(rawFile, 'wx');
+  const stopTour = new AbortController();
   let latestFrame;
   cdp.on('Page.screencastFrame', ({ data, sessionId }) => {
     latestFrame = Buffer.from(data, 'base64');
@@ -107,19 +114,45 @@ async function recordFrames(session, settings, rawFile, task) {
     if (!latestFrame) throw new Error('Chromium did not provide a video frame. Retry with a smaller viewport.');
 
     await schedulePageScroll(page, settings, timeout);
-    const recordingStage = settings.mode === 'manual' ? 'Recording the interactive Chromium window' : 'Recording website';
-    const frameCount = Math.round(settings.totalDuration * framesPerSecond);
+    let recordingStage = settings.mode === 'manual' ? 'Recording the interactive Chromium window' : 'Recording website';
+    const minimumFrames = Math.round(settings.totalDuration * framesPerSecond);
+    const touring = settings.mode === 'navigation';
     const start = performance.now();
-    for (let index = 0; index < frameCount; index++) {
+    let tourCompletedAt;
+    let tourError;
+    if (touring) {
+      const signal = task.signal ? AbortSignal.any([task.signal, stopTour.signal]) : stopTour.signal;
+      runNavigationTour(session, cdp, settings, options, signal, (stage) => { recordingStage = stage; }).then(
+        () => { tourCompletedAt = performance.now(); },
+        (error) => { tourError = error; },
+      );
+    }
+
+    let capturedFrames = 0;
+    while (true) {
       task.signal?.throwIfAborted();
+      if (tourError) throw tourError;
+      const afterTourFrames = tourCompletedAt === undefined
+        ? minimumFrames
+        : Math.ceil((tourCompletedAt - start + settings.finalPause * 1000) / 1000 * framesPerSecond);
+      const frameCount = Math.max(minimumFrames, afterTourFrames);
+      if ((!touring || tourCompletedAt !== undefined) && capturedFrames >= frameCount) break;
+      if (touring && capturedFrames >= maxTourSeconds * framesPerSecond) {
+        throw new Error('The navigation tour exceeded four minutes. Use fewer labels or shorter waits.');
+      }
       if (page.isClosed()) throw new Error('The recording browser was closed before the video finished.');
       if (!/^https?:/.test(page.url())) throw new Error('The recording was interrupted by navigation outside HTTP or HTTPS.');
-      const remaining = start + index * 1000 / framesPerSecond - performance.now();
+      const remaining = start + capturedFrames * 1000 / framesPerSecond - performance.now();
       if (remaining > 0) await sleep(remaining, undefined, { signal: task.signal });
       await capture.writeFile(latestFrame);
-      if (index % 3 === 0) progress(task, 0.24 + 0.48 * (index + 1) / frameCount, recordingStage);
+      capturedFrames++;
+      if (capturedFrames % 3 === 1) {
+        progress(task, 0.24 + 0.48 * Math.min(1, capturedFrames / minimumFrames), recordingStage);
+      }
     }
+    return capturedFrames / framesPerSecond;
   } finally {
+    stopTour.abort();
     await capture.close();
     await cdp.send('Page.stopScreencast').catch(() => {});
     await cdp.detach().catch(() => {});
@@ -238,7 +271,12 @@ async function recordVideo(options, outputPath, task = {}) {
   try {
     const rawFile = join(temporary, 'capture.mjpeg');
     const tempOutput = join(temporary, 'encoded.mp4');
-    await withWebsite(viewportOptions, task, (session) => recordFrames(session, settings, rawFile, task), settings.mode === 'manual');
+    settings.totalDuration = await withWebsite(
+      viewportOptions, task,
+      (session) => recordFrames(session, settings, options, rawFile, task),
+      settings.mode === 'manual',
+      settings.mode === 'navigation' ? { serviceWorkers: 'block' } : undefined,
+    );
     const titleFile = settings.title ? join(temporary, 'title.png') : null;
     if (titleFile) await makeTitleImage(settings, titleFile);
     progress(task, 0.75, 'Encoding H.264 video');

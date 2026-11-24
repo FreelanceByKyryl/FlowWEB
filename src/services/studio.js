@@ -4,7 +4,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const sharp = require('sharp');
-const { captureScreenshot, captureManualScreenshot } = require('./screenshot');
+const { captureScreenshot, captureManualScreenshot, captureScreenshotFrames, captureManualScreenshotFrames } = require('./screenshot');
+const { resolveViewport } = require('./browser');
 const { captureSite: captureSitePages } = require('./site');
 const { recordVideo } = require('./video');
 const { renderMockup } = require('./mockup');
@@ -12,12 +13,26 @@ const { renderPortfolio, portfolioDescription, portfolioInfo, PORTFOLIO_PRESETS 
 const { writeExport, copyExport, existingExportPath } = require('./exports');
 const { captureOptions, videoOptions, mockupOptions, imageOptions, str, id, extension } = require('./inputs');
 
-const MAX_TEMP_ASSETS = 48;
+const MAX_TEMP_ASSETS = 240;
 const MAX_IMPORTED_BYTES = 35 * 1024 * 1024;
 const INPUT_IMAGE_TYPES = new Set(['png', 'jpeg', 'webp', 'gif', 'heif', 'avif']);
 
 function imageFilename(base, format) {
   return base + '.' + extension(format);
+}
+
+function screenshotProfile(options) {
+  const { width, height } = resolveViewport(options);
+  return {
+    device: options.fullPage ? 'fullpage' : options.device,
+    viewportDevice: options.device,
+    viewportWidth: width,
+    viewportHeight: height,
+    dpr: options.dpr,
+    framing: options.framing,
+    fullPage: options.fullPage,
+    sourceUrl: options.url
+  };
 }
 
 async function imagePreview(source, width = 1440, height = 1100) {
@@ -54,7 +69,7 @@ class Studio {
     try {
       const size = await sharp(file).metadata();
       const preview = await imagePreview(file);
-      this.assets.set(assetId, { ...metadata, file });
+      this.assets.set(assetId, { ...metadata, file, width: size.width, height: size.height });
       if (this.assets.size > MAX_TEMP_ASSETS) {
         const first = this.assets.keys().next().value;
         const expired = this.assets.get(first);
@@ -96,6 +111,12 @@ class Studio {
     return existingExportPath(saved.path);
   }
 
+  screenshotPath(assetId) {
+    const asset = this.assets.get(id(assetId));
+    if (asset?.kind !== 'screenshot') throw new Error('This screenshot is unavailable. Capture it again.');
+    return asset.file;
+  }
+
   async logExport(project, kind, file, details = {}) {
     const fileName = path.basename(file);
     const entry = await this.store.addExport({
@@ -114,14 +135,34 @@ class Studio {
 
   async capture(project, options, manualId, task) {
     const dir = await this.createWorkDirectory();
-    const device = options.fullPage ? 'fullpage' : options.device;
-    const file = path.join(dir, imageFilename(device, options.format));
+    const profile = screenshotProfile(options);
+    const metadata = { project, kind: 'screenshot', format: options.format, ...profile };
     try {
+      if (options.framing === 'screens') {
+        const filename = (index) => path.join(dir, imageFilename(`${profile.device}-${index}`, options.format));
+        const captureTask = {
+          ...task,
+          onProgress: (value, stage) => task.onProgress(0.9 * value, stage)
+        };
+        const frames = manualId
+          ? await captureManualScreenshotFrames(id(manualId), options, filename, captureTask)
+          : await captureScreenshotFrames(options, filename, captureTask);
+        task.signal.throwIfAborted();
+        const cached = [];
+        for (const { path: file, frameIndex, frameCount } of frames) {
+          task.signal.throwIfAborted();
+          task.onProgress(0.9 + 0.1 * cached.length / frames.length, 'Preparing image previews');
+          const frame = { ...profile, frameIndex, frameCount };
+          cached.push({ ...await this.cache(file, { ...metadata, ...frame }), ...frame });
+        }
+        return { frames: cached };
+      }
+      const file = path.join(dir, imageFilename(profile.device, options.format));
       if (manualId) await captureManualScreenshot(id(manualId), options, file, task);
       else await captureScreenshot(options, file, task);
       task.signal.throwIfAborted();
       task.onProgress(0.95, 'Preparing image preview');
-      return await this.cache(file, { project, kind: 'screenshot', device, format: options.format });
+      return { ...await this.cache(file, metadata), ...profile };
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
@@ -130,24 +171,33 @@ class Studio {
   async captureSite(project, options, task) {
     const dir = await this.createWorkDirectory();
     const root = this.store.snapshot().settings.exportDirectory;
-    const device = options.fullPage ? 'fullpage' : options.device;
+    const profile = screenshotProfile(options);
     const exports = new Map();
     try {
       const report = await captureSitePages(options, dir, {
         ...task,
         onPage: async (page) => {
-          task.signal.throwIfAborted();
-          const entry = await this.exportFile(root, project, 'screenshot', page.filename, page.path, {
-            device, sitePage: true, sourceUrl: page.url, pageTitle: page.title
-          });
-          exports.set(page.url, entry);
-          await fs.rm(page.path, { force: true });
+          const entries = [];
+          exports.set(page.url, entries);
+          for (const frame of page.frames || [page]) {
+            task.signal.throwIfAborted();
+            const { width, height } = frame.width && frame.height ? frame : await sharp(frame.path).metadata();
+            entries.push(await this.exportFile(root, project, 'screenshot', frame.filename, frame.path, {
+              ...profile, width, height, frameIndex: frame.frameIndex, frameCount: frame.frameCount,
+              sitePage: true, sourceUrl: page.url, pageTitle: page.title
+            }));
+            await fs.rm(frame.path, { force: true });
+          }
         }
       });
       return {
-        exports: [...exports.values()],
+        exports: [...exports.values()].flat(),
         pages: [
-          ...report.pages.map(({ url, title }) => ({ url, title, status: 'completed', exportId: exports.get(url).id })),
+          ...report.pages.map(({ url, title }) => {
+            const frames = exports.get(url).map(({ id, width, height, frameIndex, frameCount }) =>
+              ({ exportId: id, width, height, frameIndex, frameCount }));
+            return { url, title, status: 'completed', ...frames[0], frames };
+          }),
           ...report.failed.map(({ url, error }) => ({ url, error, status: 'failed' })),
           ...report.skipped.map(({ url, reason }) => ({ url, error: reason, status: 'skipped' }))
         ],
@@ -189,7 +239,7 @@ class Studio {
         task.signal.throwIfAborted();
         const existing = this.store.snapshot().exports
           .find((entry) => entry.projectId === project.id && entry.kind === 'screenshot' && entry.device === device &&
-            (!entry.sitePage || entry.sourceUrl === project.url));
+            (!entry.sourceUrl || entry.sourceUrl === project.url) && (!entry.frameIndex || entry.frameIndex === 1));
         if (existing) {
           try { assets[device] = await existingExportPath(existing.path); } catch { /* Recapture unavailable assets. */ }
         }
@@ -220,9 +270,13 @@ class Studio {
     const root = this.store.snapshot().settings.exportDirectory;
     const project = asset.project.id ? this.store.getProject(asset.project.id) : asset.project;
     if (!project) throw new Error('The project no longer exists.');
-    const base = kind === 'screenshot' ? asset.device : kind === 'mockup' ? 'showcase' : 'portfolio';
-    const entry = await this.exportFile(root, project, kind, imageFilename(base, asset.format), asset.file,
-      kind === 'screenshot' ? { device: asset.device } : {});
+    const { project: _project, kind: _kind, format, file, ...details } = asset;
+    let base = kind === 'screenshot' ? asset.device : kind === 'mockup' ? 'showcase' : 'portfolio';
+    if (kind === 'screenshot' && asset.frameCount > 1) {
+      base += '-' + String(asset.frameIndex).padStart(3, '0');
+    }
+    const entry = await this.exportFile(root, project, kind, imageFilename(base, format), file,
+      kind === 'screenshot' ? details : {});
     if (kind === 'portfolio') {
       await this.exportPortfolioText(root, project, str(input.description, 16000) || asset.description);
     }

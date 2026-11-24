@@ -7,7 +7,7 @@ const methods = [
   'pickDirectory', 'pickImage', 'clearTemporary', 'dependencies', 'openWebsite',
   'openProjectFolder', 'openExport', 'openExportFolder', 'enqueue', 'queueCancel',
   'queueRetry', 'queueSkip', 'previewWebsite', 'closeWebsitePreview', 'captureScreenshot', 'captureSite',
-  'saveScreenshot', 'renderMockup', 'saveMockup', 'renderPortfolio', 'savePortfolio',
+  'openScreenshot', 'saveScreenshot', 'renderMockup', 'saveMockup', 'renderPortfolio', 'savePortfolio',
   'recordVideo', 'cancelStudio'
 ];
 

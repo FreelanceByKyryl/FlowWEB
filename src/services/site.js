@@ -2,9 +2,9 @@
 
 const { createHash } = require('node:crypto');
 const { rm } = require('node:fs/promises');
-const { join } = require('node:path');
+const { basename, join } = require('node:path');
 const { evaluateWithDeadline, normalizeUrl, numberOption, preparePage, progress, withWebsite } = require('./browser');
-const { capturePage, screenshotFormat } = require('./screenshot');
+const { capturePage, capturePageFrames, screenshotFormat } = require('./screenshot');
 
 const MAX_DISCOVERED_ROUTES = 5000;
 
@@ -69,10 +69,11 @@ async function restrictNavigation({ context, page }, seed) {
   };
 }
 
-function screenshotName(url, format) {
+function screenshotName(url, format, frameIndex) {
   const label = `${url.pathname}${url.hash}`.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const suffix = createHash('sha256').update(url.href).digest('hex').slice(0, 16);
-  return `${label.slice(0, 80) || 'home'}-${suffix}.${format === 'jpeg' ? 'jpg' : 'png'}`;
+  const frameSuffix = frameIndex ? `-${String(frameIndex).padStart(3, '0')}` : '';
+  return `${label.slice(0, 80 - frameSuffix.length) || 'home'}-${suffix}${frameSuffix}.${format === 'jpeg' ? 'jpg' : 'png'}`;
 }
 
 async function pageDetails(page, timeout) {
@@ -149,8 +150,7 @@ async function captureSite(options, directory, task = {}) {
 
       let result;
       let links = [];
-      let outputPath;
-      let capturedFile = false;
+      let capturedPaths = [];
       guard.reset();
       try {
         progress(pageTask, 0.01, 'Loading website');
@@ -166,19 +166,27 @@ async function captureSite(options, directory, task = {}) {
         } else {
           const details = await pageDetails(page, timeout);
           links = details.links;
-          const filename = screenshotName(finalUrl, format);
-          outputPath = join(directory, filename);
-          await capturePage(session, options, outputPath, pageTask);
-          capturedFile = true;
+          const outputPath = (frameIndex) => join(directory, screenshotName(finalUrl, format, frameIndex));
+          let frames;
+          if (options.framing === 'screens') {
+            const capturedFrames = await capturePageFrames(session, options, outputPath, pageTask);
+            frames = capturedFrames.map((frame) => ({ ...frame, filename: basename(frame.path) }));
+            capturedPaths = frames.map((frame) => frame.path);
+          } else {
+            const path = outputPath();
+            await capturePage(session, options, path, pageTask);
+            capturedPaths = [path];
+          }
           if (guard.blocked) throw new Error(guard.blocked);
           if (routeUrl(page.url(), undefined, Boolean(url.hash))?.href !== finalUrl.href) {
             throw new Error('The webpage changed address during capture. Try a longer loading delay.');
           }
-          result = { url: finalUrl.href, title: details.title, filename, path: outputPath };
+          const [path] = capturedPaths;
+          result = { url: finalUrl.href, title: details.title, filename: basename(path), path, ...(frames && { frames }) };
         }
       } catch (error) {
+        await Promise.all(capturedPaths.map((path) => rm(path, { force: true })));
         task.signal?.throwIfAborted();
-        if (capturedFile) await rm(outputPath, { force: true });
         if (guard.blocked) skipped.push({ url: url.href, reason: guard.blocked });
         else failed.push({ url: url.href, error: navigationError(error) });
       }

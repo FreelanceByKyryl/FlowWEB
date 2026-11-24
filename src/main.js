@@ -265,6 +265,7 @@ function registerHandlers() {
       const options = siteOptions(input, store.snapshot().settings, project.url);
       return runStudio('Capturing site pages', (task) => studio.captureSite(project, options, task));
     },
+    openScreenshot: (value) => openPath(studio.screenshotPath(record(value).id)),
     saveScreenshot: (value) => runStudio('Saving screenshot', () => studio.exportAsset(record(value), 'screenshot')),
     renderMockup(value) {
       const input = record(value);

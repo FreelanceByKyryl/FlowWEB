@@ -52,21 +52,26 @@ function imageFormat(value) {
 }
 
 function captureOptions(input, settings, url) {
-  const device = choice(input.device ?? input.preset, 'desktop', ['desktop', 'laptop', 'tablet', 'mobile', 'custom']);
+  const hasDimensions = input.width != null || input.height != null;
+  const device = choice(input.device ?? input.preset, hasDimensions ? 'custom' : 'desktop',
+    ['desktop', 'laptop', 'tablet', 'mobile', 'custom']);
+  const framing = choice(input.framing, input.fullPage === true ? 'full' : 'viewport',
+    ['screens', 'viewport', 'full']);
   const options = {
     url,
     device,
+    framing,
     dpr: number(input.dpr ?? input.deviceScaleFactor, 1, 0.5, 3),
     delay: integer(input.delay, 0, 0, 30000),
     timeout: settings.browserTimeout,
-    fullPage: input.fullPage === true,
+    fullPage: framing === 'full',
     waitForAssets: input.waitForAssets !== false,
     lazy: input.lazy === true,
     dismissCookies: input.dismissCookies === true,
     format: imageFormat(input.format),
     quality: integer(input.quality, settings.imageQuality, 1, 100)
   };
-  if (device === 'custom' || input.width != null || input.height != null) {
+  if (device === 'custom') {
     options.width = integer(input.width, settings.screenshotWidth, 160, 4096);
     options.height = integer(input.height, settings.screenshotHeight, 160, 4096);
   }
@@ -77,7 +82,7 @@ function siteOptions(input, settings, url) {
   return {
     ...captureOptions({
       ...input,
-      fullPage: input.fullPage !== false,
+      framing: input.framing ?? (input.fullPage == null ? 'screens' : undefined),
       lazy: input.lazy !== false
     }, settings, url),
     maxPages: integer(input.maxPages, 20, 1, 100),
@@ -88,9 +93,14 @@ function siteOptions(input, settings, url) {
 
 function videoOptions(input, settings, url) {
   const viewport = captureOptions({ ...input, quality: undefined, dpr: 1 }, settings, url);
+  if (input.width != null || input.height != null) {
+    viewport.width = integer(input.width, settings.screenshotWidth, 160, 4096);
+    viewport.height = integer(input.height, settings.screenshotHeight, 160, 4096);
+  }
   return {
     ...viewport,
-    mode: choice(input.mode, 'smooth', ['static', 'smooth', 'top-to-bottom', 'down-up', 'manual', 'navigation']),
+    mode: choice(input.mode, 'smooth',
+      ['static', 'smooth', 'top-to-bottom', 'down-up', 'manual', 'navigation', 'scroll-navigation']),
     duration: number(input.duration, 8, 1, 180),
     initialPause: number(input.initialPause, 1, 0, 30),
     finalPause: number(input.finalPause, 1, 0, 30),

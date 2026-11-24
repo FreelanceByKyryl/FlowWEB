@@ -1,11 +1,13 @@
 const { setTimeout: sleep } = require('node:timers/promises');
-const { waitForAssets } = require('./browser');
+const { evaluateWithDeadline, waitForAssets } = require('./browser');
 
 const autoStepLimit = 6;
+const scrollingPageLimit = 30;
 const explicitStepLimit = 12;
 const destructiveWords = /(?:^|[^\p{L}\p{N}])(?:delete|remove|destroy|logout|log[ -]+out|sign[ -]+out|unsubscribe|checkout|purchase|buy|pay|submit|reset|confirm|send|subscribe|изтрий|изтриване|купи|плати|изпрати|потвърди|изход)(?:$|[^\p{L}\p{N}])/iu;
 const callToActionWords = /\b(?:explore|learn more|see how|view|discover|get started|features|demo|work)\b|разгледай|научи повече|започни/iu;
 const automaticLinks = 'nav a[href], header a[href], main a[href], [role="navigation"] a[href], [role="main"] a[href]';
+const nextLinkWords = /^(?:next(?: page| step)?|continue(?: reading)?|forward|следваща(?: страница)?|напред|продължи)(?:\s*[\p{P}\p{S}]+)?$/iu;
 
 function navigationLabels(value) {
   if (value === undefined || value === null) return [];
@@ -39,6 +41,7 @@ function readControl(element) {
     submits: Boolean(button?.closest('form') || (button?.form && ['submit', 'reset', 'image'].includes(type))),
     enabled: !control.matches(':disabled, [aria-disabled="true"]'),
     prominent: control.matches('[role="button"], [class*="btn" i], [class*="button" i], [class*="cta" i]'),
+    next: /(?:^|\s)next(?:\s|$)/i.test(anchor?.rel || ''),
   };
 }
 
@@ -89,9 +92,10 @@ function isRoute(href, current) {
     (/^#!?\//.test(destination.hash) && destination.hash !== current.hash);
 }
 
-async function suggestedControl(page, origin, visited, timeout) {
+async function suggestedControl(page, origin, visited, timeout, preferNext, nextOnly) {
   const current = new URL(page.url());
-  const candidates = page.locator(automaticLinks).filter({ visible: true });
+  const selectors = preferNext ? 'a[href][rel~="next" i], footer a[href], ' + automaticLinks : automaticLinks;
+  const candidates = page.locator(selectors).filter({ visible: true });
   const count = Math.min(await candidates.count(), 100);
   let best;
   try {
@@ -103,14 +107,15 @@ async function suggestedControl(page, origin, visited, timeout) {
         await handle.dispose().catch(() => {});
         continue;
       }
-      const rank = Number(control.prominent) * 2 + Number(callToActionWords.test(control.label));
-      if (best && rank <= best.rank) {
+      const rank = preferNext && control.next ? 9 : preferNext && nextLinkWords.test(control.label) ? 8 :
+        Number(control.prominent) * 2 + Number(callToActionWords.test(control.label));
+      if ((nextOnly && rank < 8) || (best && rank <= best.rank)) {
         await handle.dispose().catch(() => {});
         continue;
       }
       await best?.handle.dispose().catch(() => {});
       best = { handle, control, rank, label: control.label || new URL(control.href).pathname };
-      if (rank === 3) break;
+      if (rank === (preferNext ? 9 : 3)) break;
     }
     return best;
   } catch (error) {
@@ -156,6 +161,54 @@ async function clickStep(page, step, origin, timeout, signal) {
   }
 }
 
+async function scrollRouteToBottom(page, timeout, speed, waitForPageAssets, signal) {
+  const scrollDeadline = 240000;
+  let startAtTop = true;
+  while (true) {
+    signal.throwIfAborted();
+    await evaluateWithDeadline(page, ({ speed, startAtTop }) => {
+      const root = document.scrollingElement || document.documentElement;
+      const bottom = () => Math.max(0, root.scrollHeight - root.clientHeight);
+      const scroll = (top) => window.scrollTo({ top, behavior: 'instant' });
+      root.style.setProperty('scroll-snap-type', 'none', 'important');
+      if (startAtTop) scroll(0);
+      let target = window.scrollY;
+      let reported = target;
+      let lastMotion = performance.now();
+      let lastTick = lastMotion;
+      return new Promise((resolve, reject) => {
+        const tick = (now) => {
+          const limit = bottom();
+          if (window.scrollY >= limit - 0.5) {
+            resolve();
+            return;
+          }
+          if (window.scrollY > reported) {
+            reported = window.scrollY;
+            lastMotion = now;
+          } else if (now - lastMotion > 2500) {
+            reject(new Error('The webpage prevented scrolling to the bottom. Use Manual recording for this page.'));
+            return;
+          }
+          target = Math.min(limit, target + speed * Math.min(80, now - lastTick) / 1000);
+          lastTick = now;
+          scroll(target);
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+    }, { speed, startAtTop }, scrollDeadline, 'The navigation tour took too long to reach the bottom of the page.');
+    if (waitForPageAssets) await waitForAssets(page, timeout, signal);
+    else await sleep(200, undefined, { signal });
+    const atBottom = await evaluateWithDeadline(page, () => {
+      const root = document.scrollingElement || document.documentElement;
+      return window.scrollY >= root.scrollHeight - root.clientHeight - 0.5;
+    }, undefined, timeout, 'The webpage stopped responding while checking its final scroll position.');
+    if (atBottom) return;
+    startAtTop = false;
+  }
+}
+
 async function runNavigationTour(session, cdp, settings, options, signal, stage) {
   const { page, timeout } = session;
   const origin = new URL(page.url()).origin;
@@ -164,7 +217,10 @@ async function runNavigationTour(session, cdp, settings, options, signal, stage)
   await sleep(settings.initialPause * 1000, undefined, { signal });
 
   const labels = settings.navigationLabels;
-  const steps = labels.length || autoStepLimit;
+  const scrollPages = settings.mode === 'scroll-navigation';
+  const steps = labels.length || (scrollPages ? scrollingPageLimit - 1 : autoStepLimit);
+  let pageName = 'the first page';
+  let followPagination = false;
   let failedStatus = null;
   let openedPopup = false;
   const closePopup = (popup) => {
@@ -182,20 +238,27 @@ async function runNavigationTour(session, cdp, settings, options, signal, stage)
   page.on('popup', closePopup);
   page.on('response', detectFailedRoute);
   try {
-    for (let index = 0; index < steps; index++) {
+    for (let index = 0; index <= steps; index++) {
       signal.throwIfAborted();
+      if (scrollPages) {
+        stage(`Scrolling ${pageName}`);
+        await scrollRouteToBottom(page, timeout, settings.scrollSpeed, options.waitForAssets !== false, signal);
+      }
+      if (index === steps) break;
       const step = labels.length
         ? await labeledControl(page, labels[index], origin, timeout)
-        : await suggestedControl(page, origin, visited, timeout);
+        : await suggestedControl(page, origin, visited, timeout, scrollPages, followPagination);
       if (!step) {
-        if (index) break;
+        if (index || scrollPages) break;
         throw new Error('No visible same-site navigation links were found. Enter exact button labels or use Manual recording.');
       }
       failedStatus = null;
       stage(`Clicking ${step.label}`);
       await clickStep(page, step, origin, timeout, signal);
+      if (scrollPages && step.rank >= 8) followPagination = true;
       if (step.control.link) visited.add(step.control.href);
       visited.add(page.url());
+      pageName = step.label;
       stage(`Recording ${step.label}`);
       if (options.waitForAssets !== false) await waitForAssets(page, timeout, signal);
       await sleep(settings.navigationWait * 1000, undefined, { signal });

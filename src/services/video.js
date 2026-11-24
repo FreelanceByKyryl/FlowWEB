@@ -12,7 +12,7 @@ const { navigationLabels, runNavigationTour } = require('./navigation');
 const runFile = promisify(execFile);
 const framesPerSecond = 30;
 const introSeconds = 2;
-const modes = ['static', 'smooth', 'top-to-bottom', 'down-up', 'navigation', 'manual'];
+const modes = ['static', 'smooth', 'top-to-bottom', 'down-up', 'navigation', 'scroll-navigation', 'manual'];
 const maxTourSeconds = 240;
 
 function getFfmpegPath() {
@@ -51,7 +51,7 @@ function videoSettings(options) {
   }
   const title = typeof options.title === 'string' ? options.title.trim() : '';
   if (title.length > 160) throw new Error('The video title must be at most 160 characters.');
-  const duration = numberOption(options.duration, 8, 'Recording duration (seconds)', 1, 180);
+  const duration = mode === 'scroll-navigation' ? 0 : numberOption(options.duration, 8, 'Recording duration (seconds)', 1, 180);
   const initialPause = numberOption(options.initialPause, 0, 'Initial pause (seconds)', 0, 30);
   const finalPause = numberOption(options.finalPause, 0, 'Final pause (seconds)', 0, 30);
   return {
@@ -59,7 +59,7 @@ function videoSettings(options) {
     totalDuration: Math.ceil((duration + initialPause + finalPause) * framesPerSecond) / framesPerSecond,
     scrollSpeed: numberOption(options.scrollSpeed, 240, 'Scroll speed (pixels per second)', 10, 10000),
     quality: numberOption(options.quality, 23, 'Video quality (CRF)', 0, 51, true),
-    ...(mode === 'navigation' && {
+    ...(['navigation', 'scroll-navigation'].includes(mode) && {
       navigationLabels: navigationLabels(options.navigationLabels),
       navigationWait: numberOption(options.navigationWait, 1, 'Wait after navigation (seconds)', 0, 30),
     }),
@@ -69,7 +69,7 @@ function videoSettings(options) {
 }
 
 async function schedulePageScroll(page, { mode, duration, initialPause, scrollSpeed }, timeout) {
-  if (mode === 'static' || mode === 'manual' || mode === 'navigation') return;
+  if (!['smooth', 'top-to-bottom', 'down-up'].includes(mode)) return;
   await evaluateWithDeadline(page, ({ mode, duration, initialPause, scrollSpeed }) => {
     const scroll = (top) => window.scrollTo({ top, behavior: 'instant' });
     scroll(0);
@@ -116,7 +116,8 @@ async function recordFrames(session, settings, options, rawFile, task) {
     await schedulePageScroll(page, settings, timeout);
     let recordingStage = settings.mode === 'manual' ? 'Recording the interactive Chromium window' : 'Recording website';
     const minimumFrames = Math.round(settings.totalDuration * framesPerSecond);
-    const touring = settings.mode === 'navigation';
+    const scrollTour = settings.mode === 'scroll-navigation';
+    const touring = settings.mode === 'navigation' || scrollTour;
     const start = performance.now();
     let tourCompletedAt;
     let tourError;
@@ -147,7 +148,8 @@ async function recordFrames(session, settings, options, rawFile, task) {
       await capture.writeFile(latestFrame);
       capturedFrames++;
       if (capturedFrames % 3 === 1) {
-        progress(task, 0.24 + 0.48 * Math.min(1, capturedFrames / minimumFrames), recordingStage);
+        const progressFrames = scrollTour ? maxTourSeconds * framesPerSecond : minimumFrames;
+        progress(task, 0.24 + 0.48 * Math.min(1, capturedFrames / progressFrames), recordingStage);
       }
     }
     return capturedFrames / framesPerSecond;
@@ -275,7 +277,7 @@ async function recordVideo(options, outputPath, task = {}) {
       viewportOptions, task,
       (session) => recordFrames(session, settings, options, rawFile, task),
       settings.mode === 'manual',
-      settings.mode === 'navigation' ? { serviceWorkers: 'block' } : undefined,
+      ['navigation', 'scroll-navigation'].includes(settings.mode) ? { serviceWorkers: 'block' } : undefined,
     );
     const titleFile = settings.title ? join(temporary, 'title.png') : null;
     if (titleFile) await makeTitleImage(settings, titleFile);

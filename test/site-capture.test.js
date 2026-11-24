@@ -142,3 +142,54 @@ test('captures an explicit script-routed page at link depth zero', { timeout: 30
   assert.deepEqual(result.pages.map(({ url }) => new URL(url).hash), ['', '#/reports']);
   assert.equal(result.limited, 1);
 });
+
+test('groups separate viewport images into the corresponding site pages', { timeout: 30000 }, async (t) => {
+  const origin = await serve(t, (request, response) => {
+    if (request.url === '/about') {
+      return html(response, 'About', '<div style="height:150px;background:#8866ee"></div>');
+    }
+    if (request.url === '/unstable') {
+      return html(response, 'Unstable', `<div style="height:420px"></div><script>
+        addEventListener('scroll', () => {
+          if (scrollY > 0) history.replaceState(null, '', '/moved');
+        });
+      </script>`);
+    }
+    html(response, 'Home', `
+      <div style="height:180px;background:#cc2244"><a href="/about">About</a> <a href="/unstable">Unstable</a></div>
+      <div style="height:120px;background:#22aa44"></div>
+      <div style="height:220px;background:#2244cc"></div>`);
+  });
+  const directory = await outputDirectory(t);
+  const notifications = [];
+  const result = await captureSite({
+    url: origin, framing: 'screens', width: 320, height: 200, waitForAssets: false,
+  }, directory, {
+    onPage: async (page) => {
+      for (const frame of page.frames) assert.ok((await readFile(frame.path)).length > 0);
+      notifications.push([page.url, page.frames.length]);
+    },
+  });
+
+  assert.deepEqual(result.failed, [{
+    url: origin + '/unstable', error: 'The webpage changed address during capture. Try a longer loading delay.',
+  }]);
+  assert.deepEqual(result.skipped, []);
+  assert.deepEqual(notifications, [[origin + '/', 3], [origin + '/about', 1]]);
+  const frames = result.pages.flatMap((page) => {
+    assert.equal(page.filename, page.frames[0].filename);
+    assert.equal(page.path, page.frames[0].path);
+    return page.frames;
+  });
+  assert.deepEqual(frames.map(({ frameIndex, frameCount }) => [frameIndex, frameCount]), [[1, 3], [2, 3], [3, 3], [1, 1]]);
+  assert.deepEqual((await readdir(directory)).sort(), frames.map(({ filename }) => filename).sort());
+  const colors = [];
+  for (const frame of frames) {
+    const image = sharp(frame.path);
+    const { width, height } = await image.metadata();
+    assert.deepEqual([width, height], [320, 200]);
+    const pixel = await image.extract({ left: 120, top: 40, width: 1, height: 1 }).removeAlpha().raw().toBuffer();
+    colors.push(Array.from(pixel));
+  }
+  assert.deepEqual(colors, [[204, 34, 68], [34, 170, 68], [34, 68, 204], [136, 102, 238]]);
+});

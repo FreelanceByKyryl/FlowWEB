@@ -170,7 +170,7 @@ async function openBrowser(options, task = {}, headed = false, controls = {}) {
       }
       await preparePage(page, options, task, timeout);
     }
-    return { browser, context, page, viewport, timeout, removeAbort };
+    return { browser, context, page, device: options.device || 'desktop', viewport, dpr, timeout, removeAbort };
   } catch (error) {
     removeAbort();
     await browser?.close().catch(() => {});

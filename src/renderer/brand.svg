@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <title>Showcase Studio</title>
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="233" y2="252" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9275f7"/>
+      <stop offset=".83" stop-color="#5840ab"/>
+      <stop offset="1" stop-color="#4d3897"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="128" y1="9" x2="128" y2="247" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#d1bdff" stop-opacity=".82"/>
+      <stop offset="1" stop-color="#b7a1ff" stop-opacity=".21"/>
+    </linearGradient>
+  </defs>
+  <rect x="7" y="7" width="242" height="242" rx="54" fill="url(#surface)" stroke="url(#edge)" stroke-width="6"/>
+  <path d="m64 100 64-38 64 38-64 38-64-38Z" fill="#faf7ff"/>
+  <path d="m64 129 64 38 64-38M64 158l64 38 64-38" stroke="#faf7ff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

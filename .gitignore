@@ -1,0 +1,8 @@
+node_modules/
+release/
+test-results/
+playwright-report/
+coverage/
+Showcase Exports/
+*.log
+.env

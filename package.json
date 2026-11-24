@@ -1,0 +1,37 @@
+{
+  "name": "showcase-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local desktop studio for website screenshots, device mockups and presentation videos.",
+  "author": "Showcase Studio",
+  "main": "src/main.js",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "dev": "electron .",
+    "test": "node --test",
+    "build": "electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "lucide": "1.79.0",
+    "playwright": "1.65.1",
+    "sharp": "0.35.5"
+  },
+  "devDependencies": {
+    "electron": "40.10.6",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "studio.showcase.desktop",
+    "productName": "Showcase Studio",
+    "asar": true,
+    "files": ["src/**/*", "scripts/setup.js", "package.json"],
+    "directories": { "output": "release" },
+    "win": { "target": "nsis", "icon": "src/renderer/brand.ico", "signExecutable": false },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
